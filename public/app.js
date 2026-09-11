@@ -1,6 +1,12 @@
 const ICE_SERVERS = [
   { urls: "stun:stun.l.google.com:19302" },
   { urls: "stun:stun1.l.google.com:19302" },
+  // Бесплатный TURN (OpenRelay/Metered, ~20ГБ/мес) — спасает случаи с CGNAT/мобильным
+  // интернетом, когда прямой P2P (STUN) не пробивается. Для постоянного использования
+  // с большой нагрузкой лучше завести свои ключи на metered.ca и подставить сюда.
+  { urls: "turn:openrelay.metered.ca:80", username: "openrelayproject", credential: "openrelayproject" },
+  { urls: "turn:openrelay.metered.ca:443", username: "openrelayproject", credential: "openrelayproject" },
+  { urls: "turn:openrelay.metered.ca:443?transport=tcp", username: "openrelayproject", credential: "openrelayproject" },
 ];
 
 const socket = io();
@@ -14,6 +20,7 @@ const joinError = document.getElementById("join-error");
 
 const roomCodeDisplay = document.getElementById("room-code-display");
 const roster = document.getElementById("roster");
+const rosterCount = document.getElementById("roster-count");
 const btnMute = document.getElementById("btn-mute");
 const muteLabel = document.getElementById("mute-label");
 const btnLeave = document.getElementById("btn-leave");
@@ -27,7 +34,8 @@ let roomCode = "";
 let localStream = null;
 let muted = false;
 
-// peerId -> { pc, audioEl, callsign }
+// peerId -> { pc, audioEl, callsign, remoteMuted, status }
+// status: "connecting" | "connected" | "failed"
 const peers = new Map();
 
 function addChatLine({ callsign, text, system }) {
@@ -46,36 +54,56 @@ function addChatLine({ callsign, text, system }) {
   chatLog.scrollTop = chatLog.scrollHeight;
 }
 
+function statusLabel(status, isMuted) {
+  if (status === "failed") return "не удалось соединиться";
+  if (status === "connecting") return "соединение…";
+  return isMuted ? "микрофон выключен" : "на связи";
+}
+
 function renderRoster() {
   roster.innerHTML = "";
 
-  const selfTile = makeTile(selfId, selfCallsign, true, muted);
-  roster.appendChild(selfTile);
+  roster.appendChild(makeTile(selfId, selfCallsign, true, muted, "connected"));
 
   for (const [id, peer] of peers) {
-    roster.appendChild(makeTile(id, peer.callsign, false, peer.remoteMuted));
+    roster.appendChild(makeTile(id, peer.callsign, false, peer.remoteMuted, peer.status));
+  }
+
+  if (rosterCount) {
+    rosterCount.textContent = `${peers.size + 1}/5 на связи`;
   }
 }
 
-function makeTile(id, callsign, isSelf, isMuted) {
+function makeTile(id, callsign, isSelf, isMuted, status) {
   const tile = document.createElement("div");
-  tile.className = "tile" + (isSelf ? " is-self" : "") + (isMuted ? " muted" : "");
+  tile.className =
+    "tile" +
+    (isSelf ? " is-self" : "") +
+    (isMuted ? " muted" : "") +
+    (status === "failed" ? " failed" : "") +
+    (status === "connecting" ? " connecting" : "");
   tile.dataset.peerId = id;
+
+  const badge = document.createElement("span");
+  badge.className = "tile-badge";
+  badge.textContent = (callsign || "?").trim().charAt(0).toUpperCase() || "?";
 
   const led = document.createElement("span");
   led.className = "tile-led";
+  badge.appendChild(led);
 
   const info = document.createElement("div");
+  info.className = "tile-info";
   const name = document.createElement("div");
   name.className = "tile-name";
   name.textContent = callsign + (isSelf ? " (ты)" : "");
   const sub = document.createElement("div");
   sub.className = "tile-sub";
-  sub.textContent = isMuted ? "микрофон выключен" : "на связи";
+  sub.textContent = statusLabel(status, isMuted);
 
   info.appendChild(name);
   info.appendChild(sub);
-  tile.appendChild(led);
+  tile.appendChild(badge);
   tile.appendChild(info);
   return tile;
 }
@@ -85,13 +113,25 @@ function setSpeaking(peerId, isSpeaking) {
   if (tile) tile.classList.toggle("speaking", isSpeaking);
 }
 
+function setPeerStatus(peerId, status) {
+  const peer = peers.get(peerId);
+  if (!peer) return;
+  peer.status = status;
+  renderRoster();
+}
+
 async function initMedia() {
   localStream = await navigator.mediaDevices.getUserMedia({ audio: true, video: false });
   watchLocalVolume(localStream, (speaking) => setSpeaking(selfId, speaking));
 }
 
 function watchLocalVolume(stream, cb) {
-  const ctx = new (window.AudioContext || window.webkitAudioContext)();
+  const AudioCtx = window.AudioContext || window.webkitAudioContext;
+  const ctx = new AudioCtx();
+  // Мобильные браузеры часто создают AudioContext в состоянии "suspended"
+  // до явного пользовательского жеста — принудительно возобновляем.
+  if (ctx.state === "suspended") ctx.resume().catch(() => {});
+
   const source = ctx.createMediaStreamSource(stream);
   const analyser = ctx.createAnalyser();
   analyser.fftSize = 512;
@@ -112,6 +152,14 @@ function watchLocalVolume(stream, cb) {
   tick();
 }
 
+// Кто из пары должен слать offer — определяем строковым сравнением id,
+// одинаково на обеих сторонах, чтобы offer отправляла ровно одна сторона.
+// Без этого при одновременном обмене offer'ами (glare) соединение
+// молча ломается — это была основная причина "не слышно голос".
+function shouldInitiate(peerId) {
+  return selfId < peerId;
+}
+
 function createPeerConnection(peerId, callsign) {
   const pc = new RTCPeerConnection({ iceServers: ICE_SERVERS });
 
@@ -123,16 +171,35 @@ function createPeerConnection(peerId, callsign) {
     }
   };
 
+  pc.oniceconnectionstatechange = () => {
+    const state = pc.iceConnectionState;
+    if (state === "connected" || state === "completed") {
+      setPeerStatus(peerId, "connected");
+    } else if (state === "failed") {
+      // Один раз пробуем перезапустить ICE (может помочь при временной сети)
+      // прежде чем показать "не удалось соединиться".
+      if (shouldInitiate(peerId)) {
+        pc.restartIce();
+      }
+      setPeerStatus(peerId, "failed");
+    } else if (state === "disconnected") {
+      setPeerStatus(peerId, "connecting");
+    }
+  };
+
   pc.ontrack = (e) => {
     const audioEl = document.createElement("audio");
     audioEl.autoplay = true;
+    audioEl.playsInline = true;
     audioEl.srcObject = e.streams[0];
     document.body.appendChild(audioEl);
-    peers.get(peerId).audioEl = audioEl;
+    const peer = peers.get(peerId);
+    if (peer) peer.audioEl = audioEl;
     watchLocalVolume(e.streams[0], (speaking) => setSpeaking(peerId, speaking));
   };
 
-  peers.set(peerId, { pc, callsign, audioEl: null, remoteMuted: false });
+  const existing = peers.get(peerId) || {};
+  peers.set(peerId, { ...existing, pc, callsign, audioEl: existing.audioEl || null, remoteMuted: existing.remoteMuted || false, status: "connecting" });
   return pc;
 }
 
@@ -144,20 +211,30 @@ async function callPeer(peerId, callsign) {
   renderRoster();
 }
 
+async function connectToPeer(peerId, callsign) {
+  if (shouldInitiate(peerId)) {
+    await callPeer(peerId, callsign);
+  } else {
+    // Ждём offer от собеседника — просто отмечаем как "в процессе".
+    peers.set(peerId, { pc: null, callsign, audioEl: null, remoteMuted: false, status: "connecting" });
+    renderRoster();
+  }
+}
+
 async function handleSignal({ from, data }) {
   if (data.type === "offer") {
     const existing = peers.get(from);
-    const pc = existing ? existing.pc : createPeerConnection(from, existing ? existing.callsign : "Operator");
+    const pc = existing && existing.pc ? existing.pc : createPeerConnection(from, existing ? existing.callsign : "Operator");
     await pc.setRemoteDescription(data.sdp);
     const answer = await pc.createAnswer();
     await pc.setLocalDescription(answer);
     socket.emit("signal", { to: from, data: { type: "answer", sdp: answer } });
   } else if (data.type === "answer") {
     const peer = peers.get(from);
-    if (peer) await peer.pc.setRemoteDescription(data.sdp);
+    if (peer && peer.pc) await peer.pc.setRemoteDescription(data.sdp);
   } else if (data.type === "ice") {
     const peer = peers.get(from);
-    if (peer) {
+    if (peer && peer.pc) {
       try {
         await peer.pc.addIceCandidate(data.candidate);
       } catch (err) {
@@ -170,7 +247,7 @@ async function handleSignal({ from, data }) {
 function removePeer(peerId) {
   const peer = peers.get(peerId);
   if (!peer) return;
-  peer.pc.close();
+  if (peer.pc) peer.pc.close();
   if (peer.audioEl) peer.audioEl.remove();
   peers.delete(peerId);
   renderRoster();
@@ -181,9 +258,8 @@ function removePeer(peerId) {
 socket.on("signal", handleSignal);
 
 socket.on("peer-joined", async ({ id, callsign }) => {
-  peers.set(id, { pc: null, callsign, audioEl: null, remoteMuted: false });
   addChatLine({ system: true, text: `${callsign} вышел на связь.` });
-  await callPeer(id, callsign);
+  await connectToPeer(id, callsign);
 });
 
 socket.on("peer-left", ({ id }) => {
@@ -242,8 +318,7 @@ btnJoin.addEventListener("click", async () => {
     addChatLine({ system: true, text: `Ты на канале ${roomCode}.` });
 
     for (const p of res.peers) {
-      peers.set(p.id, { pc: null, callsign: p.callsign, audioEl: null, remoteMuted: false });
-      await callPeer(p.id, p.callsign);
+      await connectToPeer(p.id, p.callsign);
     }
     renderRoster();
   });
@@ -265,6 +340,7 @@ btnMute.addEventListener("click", () => {
 });
 
 btnLeave.addEventListener("click", () => {
+  if (localStream) localStream.getTracks().forEach((t) => t.stop());
   window.location.reload();
 });
 
