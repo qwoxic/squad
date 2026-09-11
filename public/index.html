@@ -1,0 +1,67 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>Squad Comms</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=Oswald:wght@400;500;600&family=IBM+Plex+Sans:wght@400;500;600&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="style.css" />
+</head>
+<body>
+
+<main id="screen-join" class="screen">
+  <div class="join-card">
+    <div class="dial">
+      <span class="dial-tick"></span>
+      <span class="dial-tick"></span>
+      <span class="dial-tick"></span>
+    </div>
+    <h1>Squad Comms</h1>
+    <p class="tagline">Голосовой канал на пятерых. Без сервера, без денег, без Дискорда.</p>
+
+    <label class="field">
+      <span>Позывной</span>
+      <input id="input-callsign" type="text" maxlength="16" placeholder="Например, Rex" autocomplete="off" />
+    </label>
+
+    <label class="field">
+      <span>Код отряда</span>
+      <input id="input-room" type="text" maxlength="12" placeholder="Придумай или введи существующий" autocomplete="off" />
+    </label>
+
+    <button id="btn-join" class="btn-primary">Выйти на связь</button>
+    <p id="join-error" class="error"></p>
+    <p class="hint">Поделись тем же кодом с командой — до 5 человек в одном канале.</p>
+  </div>
+</main>
+
+<main id="screen-room" class="screen hidden">
+  <header class="room-header">
+    <div class="room-id">
+      <span class="room-id-label">Канал</span>
+      <span id="room-code-display" class="room-id-value"></span>
+    </div>
+    <button id="btn-mute" class="btn-icon" aria-pressed="false">
+      <span id="mute-label">Микрофон включён</span>
+    </button>
+    <button id="btn-leave" class="btn-secondary">Отключиться</button>
+  </header>
+
+  <section id="roster" class="roster" aria-label="Отряд"></section>
+
+  <section class="chat">
+    <div id="chat-log" class="chat-log" aria-live="polite"></div>
+    <form id="chat-form" class="chat-form">
+      <input id="chat-input" type="text" maxlength="500" placeholder="Сообщение отряду…" autocomplete="off" />
+      <button type="submit" class="btn-primary btn-send">Отправить</button>
+    </form>
+  </section>
+</main>
+
+<audio id="remote-audio-sink" hidden></audio>
+
+<script src="/socket.io/socket.io.js"></script>
+<script src="app.js"></script>
+</body>
+</html>
