@@ -38,7 +38,9 @@ html, body {
   justify-content: center;
   padding: 24px;
   background:
-    radial-gradient(circle at 50% 0%, rgba(232, 163, 61, 0.08), transparent 55%),
+    radial-gradient(circle at 50% 0%, rgba(232, 163, 61, 0.10), transparent 55%),
+    radial-gradient(circle at 85% 90%, rgba(76, 122, 107, 0.08), transparent 45%),
+    repeating-linear-gradient(0deg, rgba(255,255,255,0.012) 0px, rgba(255,255,255,0.012) 1px, transparent 1px, transparent 3px),
     var(--bg);
 }
 
@@ -50,6 +52,7 @@ html, body {
   border-radius: 4px;
   padding: 32px 28px;
   position: relative;
+  box-shadow: 0 24px 48px -20px rgba(0, 0, 0, 0.55);
 }
 
 .dial {
@@ -207,30 +210,79 @@ html, body {
   border-bottom: 1px solid var(--line);
 }
 
+.roster-count {
+  font-size: 12px;
+  color: var(--text-muted);
+  font-variant-numeric: tabular-nums;
+}
+
 .tile {
-  flex: 1 1 140px;
-  max-width: 200px;
+  flex: 1 1 150px;
+  max-width: 210px;
   background: var(--panel);
   border: 1px solid var(--line);
-  border-radius: 3px;
+  border-radius: 4px;
   padding: 12px 14px;
   display: flex;
   align-items: center;
-  gap: 10px;
+  gap: 12px;
+  transition: border-color 0.2s ease, background 0.2s ease;
 }
 
-.tile.speaking { border-color: var(--teal); }
+.tile.speaking {
+  border-color: var(--teal);
+  background: linear-gradient(180deg, rgba(76, 122, 107, 0.10), transparent);
+}
 .tile.is-self { border-color: var(--amber-dim); }
+.tile.connecting { opacity: 0.65; }
+.tile.failed { border-color: var(--danger); }
+
+.tile-badge {
+  position: relative;
+  flex-shrink: 0;
+  width: 34px;
+  height: 34px;
+  border-radius: 50%;
+  background: var(--panel-raised);
+  border: 1px solid var(--line);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-family: var(--font-display);
+  font-size: 14px;
+  color: var(--text-muted);
+}
+
+.tile.is-self .tile-badge { color: var(--amber); border-color: var(--amber-dim); }
+.tile.speaking .tile-badge {
+  color: var(--teal);
+  border-color: var(--teal);
+  animation: pulse-ring 1.4s ease-out infinite;
+}
+
+@keyframes pulse-ring {
+  0% { box-shadow: 0 0 0 0 rgba(76, 122, 107, 0.45); }
+  100% { box-shadow: 0 0 0 6px rgba(76, 122, 107, 0); }
+}
 
 .tile-led {
-  width: 8px;
-  height: 8px;
+  position: absolute;
+  bottom: -1px;
+  right: -1px;
+  width: 9px;
+  height: 9px;
   border-radius: 50%;
-  background: var(--line);
-  flex-shrink: 0;
+  background: var(--text-muted);
+  border: 2px solid var(--panel);
 }
-.tile.speaking .tile-led { background: var(--teal); box-shadow: 0 0 6px var(--teal); }
+.tile.speaking .tile-led { background: var(--teal); }
 .tile.muted .tile-led { background: var(--danger); }
+.tile.connecting .tile-led { background: var(--amber-dim); }
+.tile.failed .tile-led { background: var(--danger); }
+
+.tile-info {
+  min-width: 0;
+}
 
 .tile-name {
   font-family: var(--font-display);
@@ -245,6 +297,7 @@ html, body {
   font-size: 11px;
   color: var(--text-muted);
 }
+.tile.failed .tile-sub { color: var(--danger); }
 
 .chat {
   flex: 1;
