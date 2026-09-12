@@ -10,6 +10,31 @@ const CONNECT_TIMEOUT_MS = 9000;
 
 const socket = io();
 
+function showJoinStatus(text, isError) {
+  joinError.textContent = text;
+  joinError.style.color = isError ? "var(--danger)" : "var(--text-muted)";
+}
+
+function reportRuntimeIssue(text) {
+  if (!screenRoom.classList.contains("hidden")) {
+    addChatLine({ system: true, text });
+  } else {
+    showJoinStatus(text, true);
+    btnJoin.disabled = false;
+  }
+}
+
+window.addEventListener("error", (e) => {
+  console.error(e.error || e.message);
+  reportRuntimeIssue("Сбой в скрипте: " + (e.message || "неизвестная ошибка") + ". Обнови страницу.");
+});
+
+window.addEventListener("unhandledrejection", (e) => {
+  console.error(e.reason);
+  const msg = (e.reason && e.reason.message) || String(e.reason);
+  reportRuntimeIssue("Сбой: " + msg + ". Обнови страницу и попробуй снова.");
+});
+
 const screenJoin = document.getElementById("screen-join");
 const screenRoom = document.getElementById("screen-room");
 const inputCallsign = document.getElementById("input-callsign");
@@ -329,24 +354,82 @@ btnJoin.addEventListener("click", async () => {
   const callsign = inputCallsign.value.trim() || "Operator";
   const code = inputRoom.value.trim();
   if (!code) {
-    joinError.textContent = "Введи код отряда.";
+    showJoinStatus("Введи код отряда.", true);
     return;
   }
 
   btnJoin.disabled = true;
-  joinError.textContent = "";
+  showJoinStatus("Запрашиваю доступ к микрофону…", false);
 
   try {
     await initMedia();
   } catch (err) {
-    joinError.textContent = "Не получилось включить микрофон. Разреши доступ и попробуй снова.";
+    console.error(err);
+    showJoinStatus("Не получилось включить микрофон. Разреши доступ и попробуй снова.", true);
     btnJoin.disabled = false;
     return;
   }
 
-  socket.emit("join-room", { roomCode: code, callsign }, async (res) => {
-    if (!res.ok) {
-      joinError.textContent = res.reason;
+  showJoinStatus("Подключаюсь к серверу… (если он спал — это может занять до 30 секунд)", false);
+
+  socket.timeout(25000).emit("join-room", { roomCode: code, callsign }, async (err, res) => {
+    if (err) {
+      showJoinStatus("Сервер не отвечает. Если ссылку давно не открывали, бесплатный хостинг мог заснуть — подожди полминуты и жми ещё раз.", true);
       btnJoin.disabled = false;
       return;
     }
+
+    if (!res.ok) {
+      showJoinStatus(res.reason, true);
+      btnJoin.disabled = false;
+      return;
+    }
+
+    selfId = res.selfId;
+    selfCallsign = callsign;
+    roomCode = code.toUpperCase();
+
+    screenJoin.classList.add("hidden");
+    screenRoom.classList.remove("hidden");
+    roomCodeDisplay.textContent = roomCode;
+    addChatLine({ system: true, text: `Ты на канале ${roomCode}.` });
+
+    for (const p of res.peers) {
+      try {
+        await connectToPeer(p.id, p.callsign);
+      } catch (err) {
+        console.error("не удалось начать соединение с", p.callsign, err);
+        addChatLine({ system: true, text: `Не получилось начать соединение с ${p.callsign}.` });
+      }
+    }
+    renderRoster();
+  });
+});
+
+[inputCallsign, inputRoom].forEach((el) =>
+  el.addEventListener("keydown", (e) => {
+    if (e.key === "Enter") btnJoin.click();
+  })
+);
+
+btnMute.addEventListener("click", () => {
+  muted = !muted;
+  localStream.getAudioTracks().forEach((t) => (t.enabled = !muted));
+  muteLabel.textContent = muted ? "Микрофон выключен" : "Микрофон включён";
+  btnMute.setAttribute("aria-pressed", String(muted));
+  socket.emit("mic-state", { muted });
+  renderRoster();
+});
+
+btnLeave.addEventListener("click", () => {
+  if (localStream) localStream.getTracks().forEach((t) => t.stop());
+  window.location.reload();
+});
+
+chatForm.addEventListener("submit", (e) => {
+  e.preventDefault();
+  const text = chatInput.value.trim();
+  if (!text) return;
+  socket.emit("chat-message", { text });
+  chatInput.value = "";
+});
