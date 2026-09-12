@@ -2,6 +2,8 @@ const express = require("express");
 const http = require("http");
 const path = require("path");
 const { Server } = require("socket.io");
+const db = require("./db");
+const auth = require("./auth");
 
 const PORT = process.env.PORT || 3000;
 const MAX_PER_ROOM = 5;
@@ -12,19 +14,70 @@ app.use(express.static(path.join(__dirname, "public")));
 const server = http.createServer(app);
 const io = new Server(server);
 
-// roomCode -> Map(socketId -> callsign)
+// roomCode -> Map(socketId -> displayName)
 const rooms = new Map();
 
 function roomMembers(roomCode) {
   return rooms.get(roomCode) || new Map();
 }
 
+function validCredentials(username, password) {
+  const name = db.normalize(username);
+  if (name.length < 3 || name.length > 20) {
+    return "Ник должен быть от 3 до 20 символов.";
+  }
+  if (!/^[a-zA-Zа-яА-ЯёЁ0-9_]+$/.test(name)) {
+    return "Только буквы, цифры и подчёркивание.";
+  }
+  if (!password || password.length < 4) {
+    return "Пароль минимум 4 символа.";
+  }
+  return null;
+}
+
 io.on("connection", (socket) => {
   let currentRoom = null;
 
-  socket.on("join-room", ({ roomCode, callsign }, ack) => {
+  socket.on("register", async ({ username, password }, ack) => {
+    const problem = validCredentials(username, password);
+    if (problem) return ack({ ok: false, reason: problem });
+
+    try {
+      const result = await db.createUser(username, password);
+      if (!result.ok) return ack(result);
+      socket.data.username = result.displayName;
+      ack({ ok: true, displayName: result.displayName, token: auth.issueToken(result.displayName) });
+    } catch (err) {
+      console.error("register error", err);
+      ack({ ok: false, reason: "Что-то сломалось на сервере, попробуй ещё раз." });
+    }
+  });
+
+  socket.on("login", async ({ username, password }, ack) => {
+    try {
+      const result = await db.verifyUser(username, password);
+      if (!result.ok) return ack(result);
+      socket.data.username = result.displayName;
+      ack({ ok: true, displayName: result.displayName, token: auth.issueToken(result.displayName) });
+    } catch (err) {
+      console.error("login error", err);
+      ack({ ok: false, reason: "Что-то сломалось на сервере, попробуй ещё раз." });
+    }
+  });
+
+  socket.on("resume-session", ({ token }, ack) => {
+    const displayName = auth.verifyToken(token);
+    if (!displayName) return ack({ ok: false });
+    socket.data.username = displayName;
+    ack({ ok: true, displayName });
+  });
+
+  socket.on("join-room", ({ roomCode }, ack) => {
+    if (!socket.data.username) {
+      return ack({ ok: false, reason: "Сначала войди в аккаунт." });
+    }
+    const callsign = socket.data.username;
     roomCode = (roomCode || "").trim().toUpperCase().slice(0, 12);
-    callsign = (callsign || "Operator").trim().slice(0, 16);
 
     if (!roomCode) {
       return ack({ ok: false, reason: "Введи код отряда." });
