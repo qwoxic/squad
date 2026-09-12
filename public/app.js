@@ -35,9 +35,18 @@ window.addEventListener("unhandledrejection", (e) => {
   reportRuntimeIssue("Сбой: " + msg + ". Обнови страницу и попробуй снова.");
 });
 
+const screenAuth = document.getElementById("screen-auth");
 const screenJoin = document.getElementById("screen-join");
 const screenRoom = document.getElementById("screen-room");
-const inputCallsign = document.getElementById("input-callsign");
+
+const tabs = document.querySelectorAll(".tab");
+const inputUsername = document.getElementById("input-username");
+const inputPassword = document.getElementById("input-password");
+const btnAuth = document.getElementById("btn-auth");
+const authStatus = document.getElementById("auth-status");
+const lobbyGreeting = document.getElementById("lobby-greeting");
+const btnLogout = document.getElementById("btn-logout");
+
 const inputRoom = document.getElementById("input-room");
 const btnJoin = document.getElementById("btn-join");
 const joinError = document.getElementById("join-error");
@@ -350,8 +359,79 @@ socket.on("chat-message", ({ callsign, text }) => {
   addChatLine({ callsign, text });
 });
 
+const TOKEN_KEY = "squadCommsToken";
+let authMode = "login";
+
+function showAuthStatus(text) {
+  authStatus.textContent = text;
+}
+
+function enterLobby(displayName) {
+  selfCallsign = displayName;
+  lobbyGreeting.textContent = `Привет, ${displayName}`;
+  screenAuth.classList.add("hidden");
+  screenJoin.classList.remove("hidden");
+}
+
+tabs.forEach((tab) => {
+  tab.addEventListener("click", () => {
+    authMode = tab.dataset.mode;
+    tabs.forEach((t) => t.classList.toggle("active", t === tab));
+    btnAuth.textContent = authMode === "login" ? "Войти" : "Зарегистрироваться";
+    showAuthStatus("");
+  });
+});
+
+btnAuth.addEventListener("click", () => {
+  const username = inputUsername.value.trim();
+  const password = inputPassword.value;
+
+  if (!username || !password) {
+    showAuthStatus("Заполни ник и пароль.");
+    return;
+  }
+
+  btnAuth.disabled = true;
+  showAuthStatus(authMode === "login" ? "Входим…" : "Регистрируем…");
+
+  socket.timeout(15000).emit(authMode, { username, password }, (err, res) => {
+    btnAuth.disabled = false;
+    if (err) {
+      showAuthStatus("Сервер не отвечает, попробуй ещё раз через полминуты.");
+      return;
+    }
+    if (!res.ok) {
+      showAuthStatus(res.reason);
+      return;
+    }
+    localStorage.setItem(TOKEN_KEY, res.token);
+    enterLobby(res.displayName);
+  });
+});
+
+[inputUsername, inputPassword].forEach((el) =>
+  el.addEventListener("keydown", (e) => {
+    if (e.key === "Enter") btnAuth.click();
+  })
+);
+
+btnLogout.addEventListener("click", () => {
+  localStorage.removeItem(TOKEN_KEY);
+  window.location.reload();
+});
+
+const savedToken = localStorage.getItem(TOKEN_KEY);
+if (savedToken) {
+  socket.timeout(10000).emit("resume-session", { token: savedToken }, (err, res) => {
+    if (!err && res && res.ok) {
+      enterLobby(res.displayName);
+    } else {
+      localStorage.removeItem(TOKEN_KEY);
+    }
+  });
+}
+
 btnJoin.addEventListener("click", async () => {
-  const callsign = inputCallsign.value.trim() || "Operator";
   const code = inputRoom.value.trim();
   if (!code) {
     showJoinStatus("Введи код отряда.", true);
@@ -372,7 +452,7 @@ btnJoin.addEventListener("click", async () => {
 
   showJoinStatus("Подключаюсь к серверу… (если он спал — это может занять до 30 секунд)", false);
 
-  socket.timeout(25000).emit("join-room", { roomCode: code, callsign }, async (err, res) => {
+  socket.timeout(25000).emit("join-room", { roomCode: code }, async (err, res) => {
     if (err) {
       showJoinStatus("Сервер не отвечает. Если ссылку давно не открывали, бесплатный хостинг мог заснуть — подожди полминуты и жми ещё раз.", true);
       btnJoin.disabled = false;
@@ -386,7 +466,6 @@ btnJoin.addEventListener("click", async () => {
     }
 
     selfId = res.selfId;
-    selfCallsign = callsign;
     roomCode = code.toUpperCase();
 
     screenJoin.classList.add("hidden");
@@ -406,11 +485,9 @@ btnJoin.addEventListener("click", async () => {
   });
 });
 
-[inputCallsign, inputRoom].forEach((el) =>
-  el.addEventListener("keydown", (e) => {
-    if (e.key === "Enter") btnJoin.click();
-  })
-);
+inputRoom.addEventListener("keydown", (e) => {
+  if (e.key === "Enter") btnJoin.click();
+});
 
 btnMute.addEventListener("click", () => {
   muted = !muted;
