@@ -1,13 +1,12 @@
 const ICE_SERVERS = [
   { urls: "stun:stun.l.google.com:19302" },
   { urls: "stun:stun1.l.google.com:19302" },
-  // Бесплатный TURN (OpenRelay/Metered, ~20ГБ/мес) — спасает случаи с CGNAT/мобильным
-  // интернетом, когда прямой P2P (STUN) не пробивается. Для постоянного использования
-  // с большой нагрузкой лучше завести свои ключи на metered.ca и подставить сюда.
   { urls: "turn:openrelay.metered.ca:80", username: "openrelayproject", credential: "openrelayproject" },
   { urls: "turn:openrelay.metered.ca:443", username: "openrelayproject", credential: "openrelayproject" },
   { urls: "turn:openrelay.metered.ca:443?transport=tcp", username: "openrelayproject", credential: "openrelayproject" },
 ];
+
+const CONNECT_TIMEOUT_MS = 9000;
 
 const socket = io();
 
@@ -34,8 +33,6 @@ let roomCode = "";
 let localStream = null;
 let muted = false;
 
-// peerId -> { pc, audioEl, callsign, remoteMuted, status }
-// status: "connecting" | "connected" | "failed"
 const peers = new Map();
 
 function addChatLine({ callsign, text, system }) {
@@ -62,16 +59,11 @@ function statusLabel(status, isMuted) {
 
 function renderRoster() {
   roster.innerHTML = "";
-
   roster.appendChild(makeTile(selfId, selfCallsign, true, muted, "connected"));
-
   for (const [id, peer] of peers) {
     roster.appendChild(makeTile(id, peer.callsign, false, peer.remoteMuted, peer.status));
   }
-
-  if (rosterCount) {
-    rosterCount.textContent = `${peers.size + 1}/5 на связи`;
-  }
+  if (rosterCount) rosterCount.textContent = `${peers.size + 1}/5 на связи`;
 }
 
 function makeTile(id, callsign, isSelf, isMuted, status) {
@@ -128,8 +120,6 @@ async function initMedia() {
 function watchLocalVolume(stream, cb) {
   const AudioCtx = window.AudioContext || window.webkitAudioContext;
   const ctx = new AudioCtx();
-  // Мобильные браузеры часто создают AudioContext в состоянии "suspended"
-  // до явного пользовательского жеста — принудительно возобновляем.
   if (ctx.state === "suspended") ctx.resume().catch(() => {});
 
   const source = ctx.createMediaStreamSource(stream);
@@ -152,12 +142,31 @@ function watchLocalVolume(stream, cb) {
   tick();
 }
 
-// Кто из пары должен слать offer — определяем строковым сравнением id,
-// одинаково на обеих сторонах, чтобы offer отправляла ровно одна сторона.
-// Без этого при одновременном обмене offer'ами (glare) соединение
-// молча ломается — это была основная причина "не слышно голос".
 function shouldInitiate(peerId) {
   return selfId < peerId;
+}
+
+function clearConnectTimer(peer) {
+  if (peer && peer.connectTimer) {
+    clearTimeout(peer.connectTimer);
+    peer.connectTimer = null;
+  }
+}
+
+function armConnectTimer(peerId) {
+  const peer = peers.get(peerId);
+  if (!peer) return;
+  clearConnectTimer(peer);
+  peer.connectTimer = setTimeout(() => {
+    const p = peers.get(peerId);
+    if (!p || !p.pc) return;
+    const state = p.pc.iceConnectionState;
+    if (state !== "connected" && state !== "completed") {
+      if (shouldInitiate(peerId)) {
+        p.pc.restartIce();
+      }
+    }
+  }, CONNECT_TIMEOUT_MS);
 }
 
 function createPeerConnection(peerId, callsign) {
@@ -173,17 +182,18 @@ function createPeerConnection(peerId, callsign) {
 
   pc.oniceconnectionstatechange = () => {
     const state = pc.iceConnectionState;
+    const peer = peers.get(peerId);
     if (state === "connected" || state === "completed") {
+      clearConnectTimer(peer);
       setPeerStatus(peerId, "connected");
     } else if (state === "failed") {
-      // Один раз пробуем перезапустить ICE (может помочь при временной сети)
-      // прежде чем показать "не удалось соединиться".
-      if (shouldInitiate(peerId)) {
-        pc.restartIce();
-      }
+      clearConnectTimer(peer);
+      if (shouldInitiate(peerId)) pc.restartIce();
       setPeerStatus(peerId, "failed");
     } else if (state === "disconnected") {
       setPeerStatus(peerId, "connecting");
+    } else if (state === "checking" || state === "new") {
+      armConnectTimer(peerId);
     }
   };
 
@@ -199,8 +209,30 @@ function createPeerConnection(peerId, callsign) {
   };
 
   const existing = peers.get(peerId) || {};
-  peers.set(peerId, { ...existing, pc, callsign, audioEl: existing.audioEl || null, remoteMuted: existing.remoteMuted || false, status: "connecting" });
+  peers.set(peerId, {
+    ...existing,
+    pc,
+    callsign,
+    audioEl: existing.audioEl || null,
+    remoteMuted: existing.remoteMuted || false,
+    status: "connecting",
+    pendingCandidates: existing.pendingCandidates || [],
+    connectTimer: null,
+  });
   return pc;
+}
+
+async function flushPendingCandidates(peerId) {
+  const peer = peers.get(peerId);
+  if (!peer || !peer.pc || !peer.pendingCandidates.length) return;
+  const queued = peer.pendingCandidates.splice(0);
+  for (const candidate of queued) {
+    try {
+      await peer.pc.addIceCandidate(candidate);
+    } catch (err) {
+      console.warn("ice candidate failed", err);
+    }
+  }
 }
 
 async function callPeer(peerId, callsign) {
@@ -215,8 +247,15 @@ async function connectToPeer(peerId, callsign) {
   if (shouldInitiate(peerId)) {
     await callPeer(peerId, callsign);
   } else {
-    // Ждём offer от собеседника — просто отмечаем как "в процессе".
-    peers.set(peerId, { pc: null, callsign, audioEl: null, remoteMuted: false, status: "connecting" });
+    peers.set(peerId, {
+      pc: null,
+      callsign,
+      audioEl: null,
+      remoteMuted: false,
+      status: "connecting",
+      pendingCandidates: [],
+      connectTimer: null,
+    });
     renderRoster();
   }
 }
@@ -226,20 +265,27 @@ async function handleSignal({ from, data }) {
     const existing = peers.get(from);
     const pc = existing && existing.pc ? existing.pc : createPeerConnection(from, existing ? existing.callsign : "Operator");
     await pc.setRemoteDescription(data.sdp);
+    await flushPendingCandidates(from);
     const answer = await pc.createAnswer();
     await pc.setLocalDescription(answer);
     socket.emit("signal", { to: from, data: { type: "answer", sdp: answer } });
   } else if (data.type === "answer") {
     const peer = peers.get(from);
-    if (peer && peer.pc) await peer.pc.setRemoteDescription(data.sdp);
+    if (peer && peer.pc) {
+      await peer.pc.setRemoteDescription(data.sdp);
+      await flushPendingCandidates(from);
+    }
   } else if (data.type === "ice") {
     const peer = peers.get(from);
-    if (peer && peer.pc) {
+    if (!peer) return;
+    if (peer.pc && peer.pc.remoteDescription && peer.pc.remoteDescription.type) {
       try {
         await peer.pc.addIceCandidate(data.candidate);
       } catch (err) {
-        console.warn("ICE candidate error", err);
+        console.warn("ice candidate failed", err);
       }
+    } else {
+      peer.pendingCandidates.push(data.candidate);
     }
   }
 }
@@ -247,13 +293,12 @@ async function handleSignal({ from, data }) {
 function removePeer(peerId) {
   const peer = peers.get(peerId);
   if (!peer) return;
+  clearConnectTimer(peer);
   if (peer.pc) peer.pc.close();
   if (peer.audioEl) peer.audioEl.remove();
   peers.delete(peerId);
   renderRoster();
 }
-
-// ---------- Socket wiring ----------
 
 socket.on("signal", handleSignal);
 
@@ -280,8 +325,6 @@ socket.on("chat-message", ({ callsign, text }) => {
   addChatLine({ callsign, text });
 });
 
-// ---------- UI events ----------
-
 btnJoin.addEventListener("click", async () => {
   const callsign = inputCallsign.value.trim() || "Operator";
   const code = inputRoom.value.trim();
@@ -307,47 +350,3 @@ btnJoin.addEventListener("click", async () => {
       btnJoin.disabled = false;
       return;
     }
-
-    selfId = res.selfId;
-    selfCallsign = callsign;
-    roomCode = code.toUpperCase();
-
-    screenJoin.classList.add("hidden");
-    screenRoom.classList.remove("hidden");
-    roomCodeDisplay.textContent = roomCode;
-    addChatLine({ system: true, text: `Ты на канале ${roomCode}.` });
-
-    for (const p of res.peers) {
-      await connectToPeer(p.id, p.callsign);
-    }
-    renderRoster();
-  });
-});
-
-[inputCallsign, inputRoom].forEach((el) =>
-  el.addEventListener("keydown", (e) => {
-    if (e.key === "Enter") btnJoin.click();
-  })
-);
-
-btnMute.addEventListener("click", () => {
-  muted = !muted;
-  localStream.getAudioTracks().forEach((t) => (t.enabled = !muted));
-  muteLabel.textContent = muted ? "Микрофон выключен" : "Микрофон включён";
-  btnMute.setAttribute("aria-pressed", String(muted));
-  socket.emit("mic-state", { muted });
-  renderRoster();
-});
-
-btnLeave.addEventListener("click", () => {
-  if (localStream) localStream.getTracks().forEach((t) => t.stop());
-  window.location.reload();
-});
-
-chatForm.addEventListener("submit", (e) => {
-  e.preventDefault();
-  const text = chatInput.value.trim();
-  if (!text) return;
-  socket.emit("chat-message", { text });
-  chatInput.value = "";
-});
