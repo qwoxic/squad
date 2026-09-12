@@ -10,7 +10,7 @@
 </head>
 <body>
 
-<main id="screen-join" class="screen">
+<main id="screen-auth" class="screen">
   <div class="join-card">
     <div class="dial">
       <span class="dial-tick"></span>
@@ -20,10 +20,35 @@
     <h1>Squad Comms</h1>
     <p class="tagline">Голосовой канал на пятерых. Без сервера, без денег, без Дискорда.</p>
 
+    <div class="tabs">
+      <button type="button" class="tab active" data-mode="login">Вход</button>
+      <button type="button" class="tab" data-mode="register">Регистрация</button>
+    </div>
+
     <label class="field">
-      <span>Позывной</span>
-      <input id="input-callsign" type="text" maxlength="16" placeholder="Например, Rex" autocomplete="off" />
+      <span>Ник</span>
+      <input id="input-username" type="text" maxlength="20" placeholder="Например, Rex" autocomplete="username" />
     </label>
+
+    <label class="field">
+      <span>Пароль</span>
+      <input id="input-password" type="password" maxlength="64" placeholder="Минимум 4 символа" autocomplete="current-password" />
+    </label>
+
+    <button id="btn-auth" class="btn-primary">Войти</button>
+    <p id="auth-status" class="error"></p>
+  </div>
+</main>
+
+<main id="screen-join" class="screen hidden">
+  <div class="join-card">
+    <div class="dial">
+      <span class="dial-tick"></span>
+      <span class="dial-tick"></span>
+      <span class="dial-tick"></span>
+    </div>
+    <h1 id="lobby-greeting">Squad Comms</h1>
+    <p class="tagline">Введи код отряда — тот же, что у команды.</p>
 
     <label class="field">
       <span>Код отряда</span>
@@ -32,7 +57,7 @@
 
     <button id="btn-join" class="btn-primary">Выйти на связь</button>
     <p id="join-error" class="error"></p>
-    <p class="hint">Поделись тем же кодом с командой — до 5 человек в одном канале.</p>
+    <button id="btn-logout" class="btn-secondary btn-logout">Выйти из аккаунта</button>
   </div>
 </main>
 
