@@ -85,6 +85,38 @@ html, body {
   margin: 0 0 28px;
 }
 
+.tabs {
+  display: flex;
+  gap: 4px;
+  background: var(--bg);
+  border: 1px solid var(--line);
+  border-radius: 3px;
+  padding: 3px;
+  margin-bottom: 20px;
+}
+
+.tab {
+  flex: 1;
+  background: transparent;
+  border: none;
+  color: var(--text-muted);
+  padding: 8px;
+  font-family: var(--font-body);
+  font-size: 13px;
+  border-radius: 2px;
+  cursor: pointer;
+}
+
+.tab.active {
+  background: var(--panel-raised);
+  color: var(--text);
+}
+
+.btn-logout {
+  width: 100%;
+  margin-top: 14px;
+}
+
 .field {
   display: flex;
   flex-direction: column;
