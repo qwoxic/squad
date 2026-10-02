@@ -4,9 +4,7 @@ const { createClient } = require("@libsql/client");
 const dbUrl = process.env.TURSO_DATABASE_URL || "file:./data.db";
 const authToken = process.env.TURSO_AUTH_TOKEN;
 
-const db = createClient(
-  authToken ? { url: dbUrl, authToken } : { url: dbUrl }
-);
+const db = createClient(authToken ? { url: dbUrl, authToken } : { url: dbUrl });
 
 const ready = db.execute(`
   CREATE TABLE IF NOT EXISTS users (
@@ -24,16 +22,6 @@ function hashPassword(password, salt) {
 
 function normalize(username) {
   return String(username || "").trim();
-}
-
-async function usernameTaken(username) {
-  await ready;
-  const lower = normalize(username).toLowerCase();
-  const res = await db.execute({
-    sql: "SELECT 1 FROM users WHERE username_lower = ?",
-    args: [lower],
-  });
-  return res.rows.length > 0;
 }
 
 async function createUser(username, password) {
@@ -76,4 +64,4 @@ async function verifyUser(username, password) {
   return { ok: true, displayName: row.display_name };
 }
 
-module.exports = { usernameTaken, createUser, verifyUser, normalize };
+module.exports = { createUser, verifyUser, normalize };
