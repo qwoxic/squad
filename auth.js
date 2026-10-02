@@ -1,7 +1,7 @@
 const crypto = require("crypto");
 
 const SECRET = process.env.SESSION_SECRET || crypto.randomBytes(32).toString("hex");
-const TOKEN_TTL_MS = 30 * 24 * 60 * 60 * 1000; // 30 дней
+const TOKEN_TTL_MS = 30 * 24 * 60 * 60 * 1000;
 
 function sign(payloadStr) {
   return crypto.createHmac("sha256", SECRET).update(payloadStr).digest("hex");
@@ -16,7 +16,13 @@ function issueToken(displayName) {
 function verifyToken(token) {
   if (typeof token !== "string" || !token.includes(".")) return null;
   const [encoded, signature] = token.split(".");
-  if (sign(encoded) !== signature) return null;
+  const expected = sign(encoded);
+  if (
+    expected.length !== signature.length ||
+    !crypto.timingSafeEqual(Buffer.from(expected), Buffer.from(signature))
+  ) {
+    return null;
+  }
 
   try {
     const payload = JSON.parse(Buffer.from(encoded, "base64url").toString("utf8"));
