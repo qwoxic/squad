@@ -14,7 +14,6 @@ app.use(express.static(path.join(__dirname, "public")));
 const server = http.createServer(app);
 const io = new Server(server);
 
-// roomCode -> Map(socketId -> displayName)
 const rooms = new Map();
 
 function roomMembers(roomCode) {
@@ -39,6 +38,7 @@ io.on("connection", (socket) => {
   let currentRoom = null;
 
   socket.on("register", async ({ username, password }, ack) => {
+    if (typeof ack !== "function") return;
     const problem = validCredentials(username, password);
     if (problem) return ack({ ok: false, reason: problem });
 
@@ -46,7 +46,11 @@ io.on("connection", (socket) => {
       const result = await db.createUser(username, password);
       if (!result.ok) return ack(result);
       socket.data.username = result.displayName;
-      ack({ ok: true, displayName: result.displayName, token: auth.issueToken(result.displayName) });
+      ack({
+        ok: true,
+        displayName: result.displayName,
+        token: auth.issueToken(result.displayName),
+      });
     } catch (err) {
       console.error("register error", err);
       ack({ ok: false, reason: "Что-то сломалось на сервере, попробуй ещё раз." });
@@ -54,11 +58,16 @@ io.on("connection", (socket) => {
   });
 
   socket.on("login", async ({ username, password }, ack) => {
+    if (typeof ack !== "function") return;
     try {
       const result = await db.verifyUser(username, password);
       if (!result.ok) return ack(result);
       socket.data.username = result.displayName;
-      ack({ ok: true, displayName: result.displayName, token: auth.issueToken(result.displayName) });
+      ack({
+        ok: true,
+        displayName: result.displayName,
+        token: auth.issueToken(result.displayName),
+      });
     } catch (err) {
       console.error("login error", err);
       ack({ ok: false, reason: "Что-то сломалось на сервере, попробуй ещё раз." });
@@ -66,49 +75,57 @@ io.on("connection", (socket) => {
   });
 
   socket.on("resume-session", ({ token }, ack) => {
+    if (typeof ack !== "function") return;
     const displayName = auth.verifyToken(token);
     if (!displayName) return ack({ ok: false });
     socket.data.username = displayName;
     ack({ ok: true, displayName });
   });
 
-  socket.on("join-room", ({ roomCode }, ack) => {
+  socket.on("join-room", ({ roomCode } = {}, ack) => {
+    if (typeof ack !== "function") return;
     if (!socket.data.username) {
       return ack({ ok: false, reason: "Сначала войди в аккаунт." });
     }
-    const callsign = socket.data.username;
-    roomCode = (roomCode || "").trim().toUpperCase().slice(0, 12);
+    if (currentRoom) {
+      return ack({ ok: false, reason: "Ты уже в комнате." });
+    }
 
-    if (!roomCode) {
+    const callsign = socket.data.username;
+    const code = (roomCode || "").trim().toUpperCase().slice(0, 12);
+
+    if (!code) {
       return ack({ ok: false, reason: "Введи код отряда." });
     }
 
-    const members = roomMembers(roomCode);
+    if (!rooms.has(code)) rooms.set(code, new Map());
+    const members = rooms.get(code);
+
     if (members.size >= MAX_PER_ROOM) {
       return ack({ ok: false, reason: "Отряд полон (максимум 5)." });
     }
 
-    currentRoom = roomCode;
-    if (!rooms.has(roomCode)) rooms.set(roomCode, new Map());
-    rooms.get(roomCode).set(socket.id, callsign);
-    socket.join(roomCode);
+    currentRoom = code;
+    members.set(socket.id, callsign);
+    socket.join(code);
 
-    // Tell the new peer who is already here (they will initiate offers to each)
-    const existingPeers = Array.from(rooms.get(roomCode).entries())
+    const existingPeers = Array.from(members.entries())
       .filter(([id]) => id !== socket.id)
       .map(([id, name]) => ({ id, callsign: name }));
 
     ack({ ok: true, selfId: socket.id, peers: existingPeers });
 
-    // Tell existing peers a new one joined
-    socket.to(roomCode).emit("peer-joined", { id: socket.id, callsign });
+    socket.to(code).emit("peer-joined", { id: socket.id, callsign });
   });
 
-  socket.on("signal", ({ to, data }) => {
+  socket.on("signal", ({ to, data } = {}) => {
+    if (!currentRoom || !to || !data) return;
+    const members = roomMembers(currentRoom);
+    if (!members.has(to)) return;
     io.to(to).emit("signal", { from: socket.id, data });
   });
 
-  socket.on("chat-message", ({ text }) => {
+  socket.on("chat-message", ({ text } = {}) => {
     if (!currentRoom || !text) return;
     const callsign = roomMembers(currentRoom).get(socket.id) || "Operator";
     io.to(currentRoom).emit("chat-message", {
@@ -119,9 +136,9 @@ io.on("connection", (socket) => {
     });
   });
 
-  socket.on("mic-state", ({ muted }) => {
+  socket.on("mic-state", ({ muted } = {}) => {
     if (!currentRoom) return;
-    socket.to(currentRoom).emit("peer-mic-state", { id: socket.id, muted });
+    socket.to(currentRoom).emit("peer-mic-state", { id: socket.id, muted: !!muted });
   });
 
   socket.on("disconnect", () => {
@@ -132,6 +149,7 @@ io.on("connection", (socket) => {
       if (members.size === 0) rooms.delete(currentRoom);
     }
     socket.to(currentRoom).emit("peer-left", { id: socket.id });
+    currentRoom = null;
   });
 });
 
