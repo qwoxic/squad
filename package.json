@@ -7,9 +7,9 @@
     "start": "node server.js"
   },
   "dependencies": {
+    "@libsql/client": ">=0.6.0 <1.0.0",
     "express": "^4.19.2",
-    "socket.io": "^4.7.5",
-    "@libsql/client": ">=0.6.0 <1.0.0"
+    "socket.io": "^4.7.5"
   },
   "engines": {
     "node": ">=18"
