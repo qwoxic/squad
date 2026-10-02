@@ -7,33 +7,9 @@ const ICE_SERVERS = [
 ];
 
 const CONNECT_TIMEOUT_MS = 9000;
+const TOKEN_KEY = "squadCommsToken";
 
 const socket = io();
-
-function showJoinStatus(text, isError) {
-  joinError.textContent = text;
-  joinError.style.color = isError ? "var(--danger)" : "var(--text-muted)";
-}
-
-function reportRuntimeIssue(text) {
-  if (!screenRoom.classList.contains("hidden")) {
-    addChatLine({ system: true, text });
-  } else {
-    showJoinStatus(text, true);
-    btnJoin.disabled = false;
-  }
-}
-
-window.addEventListener("error", (e) => {
-  console.error(e.error || e.message);
-  reportRuntimeIssue("Сбой в скрипте: " + (e.message || "неизвестная ошибка") + ". Обнови страницу.");
-});
-
-window.addEventListener("unhandledrejection", (e) => {
-  console.error(e.reason);
-  const msg = (e.reason && e.reason.message) || String(e.reason);
-  reportRuntimeIssue("Сбой: " + msg + ". Обнови страницу и попробуй снова.");
-});
 
 const screenAuth = document.getElementById("screen-auth");
 const screenJoin = document.getElementById("screen-join");
@@ -65,9 +41,37 @@ let selfId = null;
 let selfCallsign = "Operator";
 let roomCode = "";
 let localStream = null;
+let localAudioCtx = null;
+let localAnalyserRaf = null;
 let muted = false;
+let inRoom = false;
 
 const peers = new Map();
+
+function showJoinStatus(text, isError) {
+  joinError.textContent = text;
+  joinError.style.color = isError ? "var(--danger)" : "var(--text-muted)";
+}
+
+function reportRuntimeIssue(text) {
+  if (inRoom) {
+    addChatLine({ system: true, text });
+  } else {
+    showJoinStatus(text, true);
+    btnJoin.disabled = false;
+  }
+}
+
+window.addEventListener("error", (e) => {
+  console.error(e.error || e.message);
+  reportRuntimeIssue("Сбой в скрипте: " + (e.message || "неизвестная ошибка") + ". Обнови страницу.");
+});
+
+window.addEventListener("unhandledrejection", (e) => {
+  console.error(e.reason);
+  const msg = (e.reason && e.reason.message) || String(e.reason);
+  reportRuntimeIssue("Сбой: " + msg + ". Обнови страницу и попробуй снова.");
+});
 
 function addChatLine({ callsign, text, system }) {
   const line = document.createElement("div");
@@ -89,15 +93,6 @@ function statusLabel(status, isMuted) {
   if (status === "failed") return "не удалось соединиться";
   if (status === "connecting") return "соединение…";
   return isMuted ? "микрофон выключен" : "на связи";
-}
-
-function renderRoster() {
-  roster.innerHTML = "";
-  roster.appendChild(makeTile(selfId, selfCallsign, true, muted, "connected"));
-  for (const [id, peer] of peers) {
-    roster.appendChild(makeTile(id, peer.callsign, false, peer.remoteMuted, peer.status));
-  }
-  if (rosterCount) rosterCount.textContent = `${peers.size + 1}/5 на связи`;
 }
 
 function makeTile(id, callsign, isSelf, isMuted, status) {
@@ -134,6 +129,15 @@ function makeTile(id, callsign, isSelf, isMuted, status) {
   return tile;
 }
 
+function renderRoster() {
+  roster.innerHTML = "";
+  roster.appendChild(makeTile(selfId, selfCallsign, true, muted, "connected"));
+  for (const [id, peer] of peers) {
+    roster.appendChild(makeTile(id, peer.callsign, false, peer.remoteMuted, peer.status));
+  }
+  rosterCount.textContent = `${peers.size + 1}/${5} на связи`;
+}
+
 function setSpeaking(peerId, isSpeaking) {
   const tile = roster.querySelector(`[data-peer-id="${peerId}"]`);
   if (tile) tile.classList.toggle("speaking", isSpeaking);
@@ -146,12 +150,29 @@ function setPeerStatus(peerId, status) {
   renderRoster();
 }
 
-async function initMedia() {
-  localStream = await navigator.mediaDevices.getUserMedia({ audio: true, video: false });
-  watchLocalVolume(localStream, (speaking) => setSpeaking(selfId, speaking));
+function stopLocalAnalysis() {
+  if (localAnalyserRaf !== null) {
+    cancelAnimationFrame(localAnalyserRaf);
+    localAnalyserRaf = null;
+  }
+  if (localAudioCtx) {
+    localAudioCtx.close().catch(() => {});
+    localAudioCtx = null;
+  }
 }
 
-function watchLocalVolume(stream, cb) {
+function releaseMedia() {
+  stopLocalAnalysis();
+  if (localStream) {
+    localStream.getTracks().forEach((t) => t.stop());
+    localStream = null;
+  }
+  muted = false;
+  muteLabel.textContent = "Микрофон включён";
+  btnMute.setAttribute("aria-pressed", "false");
+}
+
+function watchVolume(stream, cb) {
   const AudioCtx = window.AudioContext || window.webkitAudioContext;
   const ctx = new AudioCtx();
   if (ctx.state === "suspended") ctx.resume().catch(() => {});
@@ -161,19 +182,43 @@ function watchLocalVolume(stream, cb) {
   analyser.fftSize = 512;
   source.connect(analyser);
   const data = new Uint8Array(analyser.frequencyBinCount);
+
   let speaking = false;
+  let rafId = null;
+  let stopped = false;
 
   function tick() {
+    if (stopped) return;
     analyser.getByteFrequencyData(data);
-    const avg = data.reduce((a, b) => a + b, 0) / data.length;
+    let sum = 0;
+    for (let i = 0; i < data.length; i++) sum += data[i];
+    const avg = sum / data.length;
     const nowSpeaking = avg > 12 && !muted;
     if (nowSpeaking !== speaking) {
       speaking = nowSpeaking;
       cb(speaking);
     }
-    requestAnimationFrame(tick);
+    rafId = requestAnimationFrame(tick);
   }
   tick();
+
+  return () => {
+    stopped = true;
+    if (rafId !== null) cancelAnimationFrame(rafId);
+    try { source.disconnect(); } catch {}
+    try { analyser.disconnect(); } catch {}
+    ctx.close().catch(() => {});
+  };
+}
+
+function initLocalMedia() {
+  return navigator.mediaDevices
+    .getUserMedia({ audio: true, video: false })
+    .then((stream) => {
+      localStream = stream;
+      const stop = watchVolume(stream, (speaking) => setSpeaking(selfId, speaking));
+      localAudioCtx = { stop };
+    });
 }
 
 function shouldInitiate(peerId) {
@@ -195,10 +240,8 @@ function armConnectTimer(peerId) {
     const p = peers.get(peerId);
     if (!p || !p.pc) return;
     const state = p.pc.iceConnectionState;
-    if (state !== "connected" && state !== "completed") {
-      if (shouldInitiate(peerId)) {
-        p.pc.restartIce();
-      }
+    if (state !== "connected" && state !== "completed" && shouldInitiate(peerId)) {
+      try { p.pc.restartIce(); } catch {}
     }
   }, CONNECT_TIMEOUT_MS);
 }
@@ -222,7 +265,9 @@ function createPeerConnection(peerId, callsign) {
       setPeerStatus(peerId, "connected");
     } else if (state === "failed") {
       clearConnectTimer(peer);
-      if (shouldInitiate(peerId)) pc.restartIce();
+      if (shouldInitiate(peerId)) {
+        try { pc.restartIce(); } catch {}
+      }
       setPeerStatus(peerId, "failed");
     } else if (state === "disconnected") {
       setPeerStatus(peerId, "connecting");
@@ -239,7 +284,8 @@ function createPeerConnection(peerId, callsign) {
     document.body.appendChild(audioEl);
     const peer = peers.get(peerId);
     if (peer) peer.audioEl = audioEl;
-    watchLocalVolume(e.streams[0], (speaking) => setSpeaking(peerId, speaking));
+    const stop = watchVolume(e.streams[0], (speaking) => setSpeaking(peerId, speaking));
+    if (peer) peer.stopWatch = stop;
   };
 
   const existing = peers.get(peerId) || {};
@@ -252,6 +298,7 @@ function createPeerConnection(peerId, callsign) {
     status: "connecting",
     pendingCandidates: existing.pendingCandidates || [],
     connectTimer: null,
+    stopWatch: existing.stopWatch || null,
   });
   return pc;
 }
@@ -289,6 +336,7 @@ async function connectToPeer(peerId, callsign) {
       status: "connecting",
       pendingCandidates: [],
       connectTimer: null,
+      stopWatch: null,
     });
     renderRoster();
   }
@@ -297,7 +345,10 @@ async function connectToPeer(peerId, callsign) {
 async function handleSignal({ from, data }) {
   if (data.type === "offer") {
     const existing = peers.get(from);
-    const pc = existing && existing.pc ? existing.pc : createPeerConnection(from, existing ? existing.callsign : "Operator");
+    const pc =
+      existing && existing.pc
+        ? existing.pc
+        : createPeerConnection(from, existing ? existing.callsign : "Operator");
     await pc.setRemoteDescription(data.sdp);
     await flushPendingCandidates(from);
     const answer = await pc.createAnswer();
@@ -328,17 +379,32 @@ function removePeer(peerId) {
   const peer = peers.get(peerId);
   if (!peer) return;
   clearConnectTimer(peer);
-  if (peer.pc) peer.pc.close();
-  if (peer.audioEl) peer.audioEl.remove();
+  if (peer.pc) {
+    try { peer.pc.close(); } catch {}
+  }
+  if (peer.audioEl) {
+    peer.audioEl.srcObject = null;
+    peer.audioEl.remove();
+  }
+  if (peer.stopWatch) {
+    try { peer.stopWatch(); } catch {}
+  }
   peers.delete(peerId);
   renderRoster();
 }
 
-socket.on("signal", handleSignal);
+socket.on("signal", (payload) => {
+  handleSignal(payload).catch((err) => console.error("handleSignal failed", err));
+});
 
 socket.on("peer-joined", async ({ id, callsign }) => {
   addChatLine({ system: true, text: `${callsign} вышел на связь.` });
-  await connectToPeer(id, callsign);
+  try {
+    await connectToPeer(id, callsign);
+  } catch (err) {
+    console.error("connectToPeer failed", err);
+    addChatLine({ system: true, text: `Не получилось начать соединение с ${callsign}.` });
+  }
 });
 
 socket.on("peer-left", ({ id }) => {
@@ -359,7 +425,6 @@ socket.on("chat-message", ({ callsign, text }) => {
   addChatLine({ callsign, text });
 });
 
-const TOKEN_KEY = "squadCommsToken";
 let authMode = "login";
 
 function showAuthStatus(text) {
@@ -400,8 +465,8 @@ btnAuth.addEventListener("click", () => {
       showAuthStatus("Сервер не отвечает, попробуй ещё раз через полминуты.");
       return;
     }
-    if (!res.ok) {
-      showAuthStatus(res.reason);
+    if (!res || !res.ok) {
+      showAuthStatus((res && res.reason) || "Не удалось выполнить вход.");
       return;
     }
     localStorage.setItem(TOKEN_KEY, res.token);
@@ -442,7 +507,8 @@ btnJoin.addEventListener("click", async () => {
   showJoinStatus("Запрашиваю доступ к микрофону…", false);
 
   try {
-    await initMedia();
+    releaseMedia();
+    await initLocalMedia();
   } catch (err) {
     console.error(err);
     showJoinStatus("Не получилось включить микрофон. Разреши доступ и попробуй снова.", true);
@@ -454,34 +520,41 @@ btnJoin.addEventListener("click", async () => {
 
   socket.timeout(25000).emit("join-room", { roomCode: code }, async (err, res) => {
     if (err) {
-      showJoinStatus("Сервер не отвечает. Если ссылку давно не открывали, бесплатный хостинг мог заснуть — подожди полминуты и жми ещё раз.", true);
+      showJoinStatus(
+        "Сервер не отвечает. Если ссылку давно не открывали, бесплатный хостинг мог заснуть — подожди полминуты и жми ещё раз.",
+        true
+      );
+      releaseMedia();
       btnJoin.disabled = false;
       return;
     }
 
-    if (!res.ok) {
-      showJoinStatus(res.reason, true);
+    if (!res || !res.ok) {
+      showJoinStatus((res && res.reason) || "Не удалось войти в комнату.", true);
+      releaseMedia();
       btnJoin.disabled = false;
       return;
     }
 
     selfId = res.selfId;
     roomCode = code.toUpperCase();
+    inRoom = true;
 
     screenJoin.classList.add("hidden");
     screenRoom.classList.remove("hidden");
     roomCodeDisplay.textContent = roomCode;
     addChatLine({ system: true, text: `Ты на канале ${roomCode}.` });
 
+    renderRoster();
+
     for (const p of res.peers) {
       try {
         await connectToPeer(p.id, p.callsign);
-      } catch (err) {
-        console.error("не удалось начать соединение с", p.callsign, err);
+      } catch (peerErr) {
+        console.error("connectToPeer failed", peerErr);
         addChatLine({ system: true, text: `Не получилось начать соединение с ${p.callsign}.` });
       }
     }
-    renderRoster();
   });
 });
 
@@ -491,7 +564,9 @@ inputRoom.addEventListener("keydown", (e) => {
 
 btnMute.addEventListener("click", () => {
   muted = !muted;
-  localStream.getAudioTracks().forEach((t) => (t.enabled = !muted));
+  if (localStream) {
+    localStream.getAudioTracks().forEach((t) => (t.enabled = !muted));
+  }
   muteLabel.textContent = muted ? "Микрофон выключен" : "Микрофон включён";
   btnMute.setAttribute("aria-pressed", String(muted));
   socket.emit("mic-state", { muted });
@@ -499,7 +574,8 @@ btnMute.addEventListener("click", () => {
 });
 
 btnLeave.addEventListener("click", () => {
-  if (localStream) localStream.getTracks().forEach((t) => t.stop());
+  for (const id of [...peers.keys()]) removePeer(id);
+  releaseMedia();
   window.location.reload();
 });
 
@@ -509,4 +585,8 @@ chatForm.addEventListener("submit", (e) => {
   if (!text) return;
   socket.emit("chat-message", { text });
   chatInput.value = "";
+});
+
+window.addEventListener("beforeunload", () => {
+  releaseMedia();
 });
