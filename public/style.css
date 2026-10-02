@@ -29,11 +29,7 @@ html, body {
   flex-direction: column;
 }
 
-.hidden { display: none !important; }
-
-/* ---------- Join screen ---------- */
-
-#screen-join {
+.screen-centered {
   align-items: center;
   justify-content: center;
   padding: 24px;
@@ -43,6 +39,8 @@ html, body {
     repeating-linear-gradient(0deg, rgba(255,255,255,0.012) 0px, rgba(255,255,255,0.012) 1px, transparent 1px, transparent 3px),
     var(--bg);
 }
+
+.hidden { display: none !important; }
 
 .join-card {
   width: 100%;
@@ -162,6 +160,7 @@ html, body {
 }
 .btn-primary:hover { filter: brightness(1.08); }
 .btn-primary:active { filter: brightness(0.95); }
+.btn-primary:disabled { opacity: 0.6; cursor: not-allowed; }
 
 .error {
   color: var(--danger);
@@ -169,15 +168,6 @@ html, body {
   min-height: 18px;
   margin: 10px 0 0;
 }
-
-.hint {
-  color: var(--text-muted);
-  font-size: 12px;
-  margin: 16px 0 0;
-  line-height: 1.4;
-}
-
-/* ---------- Room screen ---------- */
 
 .room-header {
   display: flex;
@@ -312,9 +302,7 @@ html, body {
 .tile.connecting .tile-led { background: var(--amber-dim); }
 .tile.failed .tile-led { background: var(--danger); }
 
-.tile-info {
-  min-width: 0;
-}
+.tile-info { min-width: 0; }
 
 .tile-name {
   font-family: var(--font-display);
@@ -363,7 +351,6 @@ html, body {
 .chat-line.system {
   color: var(--text-muted);
   font-size: 13px;
-  font-style: normal;
 }
 
 .chat-form {
